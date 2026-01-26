@@ -4,6 +4,7 @@
 #include <Adafruit_BNO055.h>
 #include <ESP32Servo.h>
 #include "SBUSReceiver.h"
+#include "BLEHandler.h"
 #include "Util.h"
 
 // --- BNO055 ---
@@ -66,6 +67,7 @@ void taskSBUS(void *pvParameters);
 void taskPID(void *pvParameters);
 void taskLOG(void *pvParameters);
 void taskServo(void *pvParameters);
+void taskBLE(void *pvParameters);
 void initDataStamp();
 void initPins();
 void printStat();
@@ -108,12 +110,16 @@ void setup() {
   // --- SBUS 初期化 ---
   sbus.begin();
 
+  // --- Bluetooth 初期化 ---
+  initBLE();
+
   // --- タスク生成 ---
-  xTaskCreate(taskBNO, "BNO", 4096, NULL, 3, NULL);
-  xTaskCreate(taskSBUS, "SBUS", 4096, NULL, 2, NULL);
-  xTaskCreate(taskPID, "PID", 4096, NULL, 4, NULL);
-  xTaskCreate(taskLOG, "LOG", 4096, NULL, 1, NULL);
-  xTaskCreate(taskServo, "SERVO", 4096, NULL, 5, NULL);
+  xTaskCreate(taskBNO, "BNO", 4096, NULL, 2, NULL);
+  xTaskCreate(taskSBUS, "SBUS", 4096, NULL, 1, NULL);
+  xTaskCreate(taskPID, "PID", 4096, NULL, 3, NULL);
+  xTaskCreate(taskLOG, "LOG", 4096, NULL, 5, NULL);
+  xTaskCreate(taskServo, "SERVO", 4096, NULL, 4, NULL);
+  xTaskCreate(taskBLE, "BLE", 4096, NULL, 6, NULL);
 
   Serial.println("RTOS Tasks started!");
 }
@@ -200,8 +206,8 @@ void taskPID(void *pvParameters) {
 
 void taskLOG(void *pvParameters) {
   for (;;) {
-    // printStat();
-    printSBUSData();
+    printStat();
+    // printSBUSData();
     // printBNOData();
     vTaskDelay(pdMS_TO_TICKS(TASK_LOG_DELAY_MS));
   }
@@ -217,6 +223,47 @@ void taskServo(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(TASK_SERVO_DELAY_MS)); // 20ms周期で制御
   }
 }
+
+void taskBLE(void *pvParameters) {
+  const TickType_t xDelay = pdMS_TO_TICKS(50); // 20Hz 更新
+  char msg[128];
+
+  for (;;) {
+    if (bleDeviceConnected) {
+      // --- 必要なデータをコピー (必ずMutex保護) ---
+      SBUSData sbusCopy;
+      BNOData  bnoCopy;
+
+      if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
+        sbusCopy = sbusData;
+        xSemaphoreGive(sbusDataMutex);
+      }
+      if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(5))) {
+        bnoCopy = bnoData;
+        xSemaphoreGive(bnoDataMutex);
+      }
+
+      // --- 送信用メッセージ生成（CSV形式） ---
+      snprintf(msg, sizeof(msg),
+        "SBUS:%d,%d,%d,%d  "
+        "RPY:%.2f,%.2f,%.2f  "
+        "G:%.2f,%.2f,%.2f  "
+        "A:%.2f,%.2f,%.2f\n",
+        sbusCopy.ch[0], sbusCopy.ch[1], sbusCopy.ch[2], sbusCopy.ch[3],
+        bnoCopy.roll, bnoCopy.pitch, bnoCopy.yaw,
+        bnoCopy.rx, bnoCopy.ry, bnoCopy.rz,
+        bnoCopy.ax, bnoCopy.ay, bnoCopy.az
+      );
+
+      // --- BLE 通知 ---
+      bleTxCharacteristic->setValue((uint8_t*)msg, strlen(msg));
+      bleTxCharacteristic->notify();
+    }
+
+    vTaskDelay(xDelay);
+  }
+}
+
 
 void initDataStamp() {
   sbusData.stamp_us = micros();
@@ -260,21 +307,15 @@ void printSBUSData() {
   if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50))) {
     if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(10))) {
       Serial.print("SBUS Data: ");
-      for (int i = 0; i < 16; i++) {
-        Serial.print("CH");
-        Serial.print(i + 1);
-        Serial.print(": ");
-        Serial.print(sbusData.ch[i]);
-        Serial.print(" ");
-      }
-      Serial.print("CH17: ");
-      Serial.print(sbusData.ch17);
-      Serial.print(" CH18: ");
-      Serial.print(sbusData.ch18);
-      Serial.print(" Failsafe: ");
-      Serial.print(sbusData.failsafe);
-      Serial.print(" FrameLost: ");
-      Serial.println(sbusData.frameLost);
+      Serial.print("CH1:");
+      Serial.print(sbusData.ch[0]);
+      Serial.print("CH2:");
+      Serial.print(sbusData.ch[1]);
+      Serial.print("CH3:");
+      Serial.print(sbusData.ch[2]);
+      Serial.print("CH4:");
+      Serial.print(sbusData.ch[3]);
+      Serial.println();
 
       xSemaphoreGive(sbusDataMutex);
     }

@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
+#include <ESP32Servo.h>
 #include "SBUSReceiver.h"
 #include "Util.h"
 
@@ -9,6 +10,8 @@
 Adafruit_BNO055 bno = Adafruit_BNO055(BNO055_SENSOR_ID, BNO055_I2C_ADDRESS);
 // --- SBUS ---
 SBUSReceiver sbus(SBUS_SERIAL, PIN_SERIAL1_RX, PIN_SERIAL1_TX);
+// --- Servo ---
+Servo servoTHR, servoELE, servoRUD;
 
 // --- 構造体定義 ---
 struct SBUSData {
@@ -55,16 +58,19 @@ SemaphoreHandle_t sbusDataMutex;
 SemaphoreHandle_t bnoDataMutex;
 SemaphoreHandle_t rpyDataMutex;
 SemaphoreHandle_t i2cMutex;
+SemaphoreHandle_t serialMutex;
 
 // --- プロトタイプ ---
 void taskBNO(void *pvParameters);
 void taskSBUS(void *pvParameters);
 void taskPID(void *pvParameters);
 void taskLOG(void *pvParameters);
+void taskServo(void *pvParameters);
 void initDataStamp();
-void printStat();//TODO
-void printSBUSData();//TODO
-void printBNOData();//TODO
+void initPins();
+void printStat();
+void printSBUSData();
+void printBNOData();
 void printRPYData();//TODO
 void printSimple();//TODO
 
@@ -79,6 +85,15 @@ void setup() {
   bnoDataMutex = xSemaphoreCreateMutex();
   rpyDataMutex = xSemaphoreCreateMutex();
   i2cMutex = xSemaphoreCreateMutex();
+  serialMutex = xSemaphoreCreateMutex();
+
+  // --- Servo 初期化 ---
+  servoTHR.setPeriodHertz(50); // 50Hz
+  servoTHR.attach(PIN_SERVO_THR);
+  servoELE.setPeriodHertz(50); // 50Hz
+  servoELE.attach(PIN_SERVO_ELE);
+  servoRUD.setPeriodHertz(50); // 50Hz
+  servoRUD.attach(PIN_SERVO_RUD);
 
   // --- BNO055 初期化 ---
   if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000))) {
@@ -97,7 +112,8 @@ void setup() {
   xTaskCreate(taskBNO, "BNO", 4096, NULL, 2, NULL);
   xTaskCreate(taskSBUS, "SBUS", 4096, NULL, 1, NULL);
   xTaskCreate(taskPID, "PID", 4096, NULL, 3, NULL);
-  xTaskCreate(taskLOG, "LOG", 4096, NULL, 4, NULL);
+  xTaskCreate(taskLOG, "LOG", 4096, NULL, 5, NULL);
+  xTaskCreate(taskServo, "SERVO", 4096, NULL, 4, NULL);
 
   Serial.println("RTOS Tasks started!");
 }
@@ -185,9 +201,20 @@ void taskPID(void *pvParameters) {
 void taskLOG(void *pvParameters) {
   for (;;) {
     printStat();
-    printSBUSData();
-    printBNOData();
+    // printSBUSData();
+    // printBNOData();
     vTaskDelay(pdMS_TO_TICKS(TASK_LOG_DELAY_MS));
+  }
+}
+
+void taskServo(void *pvParameters) {
+  for (;;) {
+    // サーボ制御コードをここに追加
+    // servoELE.writeMicroseconds(map(sbusData.ch[1], 172, 1811, 1000, 2000));
+    // servoTHR.writeMicroseconds(map(sbusData.ch[2], 172, 1811, 1000, 2000));
+    // servoRUD.writeMicroseconds(map(sbusData.ch[3], 172, 1811, 1000, 2000));
+
+    vTaskDelay(pdMS_TO_TICKS(TASK_SERVO_DELAY_MS)); // 20ms周期で制御
   }
 }
 
@@ -205,69 +232,76 @@ void initDataStamp() {
 }
 
 void printStat() {
-  Serial.print("Time stamp durations: ");
-  if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(10))) {
-    float dt_ms = (sbusData.stamp_us - sbusData.last_stamp_us) / 1000.0f;
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50))) {
+    Serial.print("Time stamp durations: ");
+    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(10))) {
+      float dt_ms = (sbusData.stamp_us - sbusData.last_stamp_us) / 1000.0f;
 
-    Serial.print("SBUS [");
-    Serial.print(dt_ms, 2);  // ← 小数2桁
-    Serial.print(" ms] ");
-    xSemaphoreGive(sbusDataMutex);
-  }
-  if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(10))) {
-    float dt_ms = (bnoData.stamp_us - bnoData.last_stamp_us) / 1000.0f;
+      Serial.print("SBUS [");
+      Serial.print(dt_ms, 2);  // ← 小数2桁
+      Serial.print(" ms] ");
+      xSemaphoreGive(sbusDataMutex);
+    }
+    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(10))) {
+      float dt_ms = (bnoData.stamp_us - bnoData.last_stamp_us) / 1000.0f;
 
-    Serial.print("BNO [");
-    Serial.print(dt_ms, 2);  // ← 小数2桁
-    Serial.print(" ms] ");
-    xSemaphoreGive(bnoDataMutex);
+      Serial.print("BNO [");
+      Serial.print(dt_ms, 2);  // ← 小数2桁
+      Serial.print(" ms] ");
+      xSemaphoreGive(bnoDataMutex);
+    }
+    Serial.println();
+
+    xSemaphoreGive(serialMutex);
   }
-  Serial.println();
 }
 
 void printSBUSData() {
-  if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(10))) {
-    Serial.print("SBUS Data: ");
-    for (int i = 0; i < 16; i++) {
-      Serial.print("CH");
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(sbusData.ch[i]);
-      Serial.print(" ");
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50))) {
+    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(10))) {
+      Serial.print("SBUS Data: ");
+      Serial.print("CH1:");
+      Serial.print(sbusData.ch[0]);
+      Serial.print("CH2:");
+      Serial.print(sbusData.ch[1]);
+      Serial.print("CH3:");
+      Serial.print(sbusData.ch[2]);
+      Serial.print("CH4:");
+      Serial.print(sbusData.ch[3]);
+      Serial.println();
+
+      xSemaphoreGive(sbusDataMutex);
     }
-    Serial.print("CH17: ");
-    Serial.print(sbusData.ch17);
-    Serial.print(" CH18: ");
-    Serial.print(sbusData.ch18);
-    Serial.print(" Failsafe: ");
-    Serial.print(sbusData.failsafe);
-    Serial.print(" FrameLost: ");
-    Serial.println(sbusData.frameLost);
-    xSemaphoreGive(sbusDataMutex);
+
+    xSemaphoreGive(serialMutex);
   }
 }
 
 void printBNOData() {
-  if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(10))) {
-    Serial.print("BNO Data: ");
-    Serial.print("Yaw: ");
-    Serial.print(bnoData.yaw);
-    Serial.print(" Pitch: ");
-    Serial.print(bnoData.pitch);
-    Serial.print(" Roll: ");
-    Serial.print(bnoData.roll);
-    Serial.print(" Rx: ");
-    Serial.print(bnoData.rx);
-    Serial.print(" Ry: ");
-    Serial.print(bnoData.ry);
-    Serial.print(" Rz: ");
-    Serial.print(bnoData.rz);
-    Serial.print(" Ax: ");
-    Serial.print(bnoData.ax);
-    Serial.print(" Ay: ");
-    Serial.print(bnoData.ay);
-    Serial.print(" Az: ");
-    Serial.println(bnoData.az);
-    xSemaphoreGive(bnoDataMutex);
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50))) {
+    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(10))) {
+      Serial.print("BNO Data: ");
+      Serial.print("Yaw: ");
+      Serial.print(bnoData.yaw);
+      Serial.print(" Pitch: ");
+      Serial.print(bnoData.pitch);
+      Serial.print(" Roll: ");
+      Serial.print(bnoData.roll);
+      Serial.print(" Rx: ");
+      Serial.print(bnoData.rx);
+      Serial.print(" Ry: ");
+      Serial.print(bnoData.ry);
+      Serial.print(" Rz: ");
+      Serial.print(bnoData.rz);
+      Serial.print(" Ax: ");
+      Serial.print(bnoData.ax);
+      Serial.print(" Ay: ");
+      Serial.print(bnoData.ay);
+      Serial.print(" Az: ");
+      Serial.println(bnoData.az);
+      xSemaphoreGive(bnoDataMutex);
+    }
+
+    xSemaphoreGive(serialMutex);
   }
 }
