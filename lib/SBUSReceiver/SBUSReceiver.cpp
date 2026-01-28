@@ -62,3 +62,4 @@ bool SBUSReceiver::getCh17() const { return ch17_; }
 bool SBUSReceiver::getCh18() const { return ch18_; }
 bool SBUSReceiver::isFailsafe() const { return failsafe_; }
 bool SBUSReceiver::isFrameLost() const { return frameLost_; }
+bool SBUSReceiver::isLostConnection() const { return channels_[15] != 1792; }

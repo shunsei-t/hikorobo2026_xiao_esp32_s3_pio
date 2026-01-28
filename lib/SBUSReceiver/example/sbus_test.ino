@@ -32,7 +32,9 @@ void loop() {
     Serial.print("  FrameLost:");
     Serial.print(sbus.isFrameLost());
     Serial.print("  Failsafe:");
-    Serial.println(sbus.isFailsafe());
+    Serial.print(sbus.isFailsafe());
+    Serial.print("  LostConnection:");
+    Serial.println(sbus.isLostConnection());
     lastTime = now;
   }
 }

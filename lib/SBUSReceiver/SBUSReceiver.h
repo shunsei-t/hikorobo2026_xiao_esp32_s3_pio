@@ -11,6 +11,7 @@ public:
     bool getCh18() const;
     bool isFailsafe() const;
     bool isFrameLost() const;
+    bool isLostConnection() const;
 
 private:
     void decode(const uint8_t *data);

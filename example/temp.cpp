@@ -3,23 +3,64 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <ESP32Servo.h>
-#include <AsyncUDP.h>
-#include <Wifi.h>
 #include "SBUSReceiver.h"
 #include "Util.h"
-#include "passwd.h"
 
-// --- 外部クラス関連 ---
+// --- BNO055 ---
 Adafruit_BNO055 bno = Adafruit_BNO055(BNO055_SENSOR_ID, BNO055_I2C_ADDRESS);
+// --- SBUS ---
 SBUSReceiver sbus(SBUS_SERIAL, PIN_SERIAL1_RX, PIN_SERIAL1_TX);
+// --- Servo ---
 Servo servoTHR, servoELE, servoRUD, servoAIL_L, servoAIL_R, servoGER;
-AsyncUDP udp;
-IPAddress pcIP(HOST_IP);
 
-// --- 内部状態 ---
+// --- 状態enums ---
+enum FlightState {
+    STATE_INIT,
+    STATE_ERROR,
+    STATE_AUTO,
+    STATE_MANUAL,
+    STATE_SBUS_LOST,
+};
+
 FlightState flightState = STATE_INIT;
 
-// -- 内部データ構造体 ---
+// --- 構造体定義 ---
+struct SBUSData {
+  uint32_t stamp_us;
+  uint32_t last_stamp_us;
+  int ch[16];
+  bool ch17;
+  bool ch18;
+  bool failsafe;
+  bool frameLost;
+  bool lostConnection;
+};
+
+struct BNOData {
+  uint32_t stamp_us;
+  uint32_t last_stamp_us;
+  float roll, pitch, yaw;
+  float rx, ry, rz;
+  float ax, ay, az;
+};
+
+struct PIDData {
+  uint16_t stamp_us;
+  uint16_t last_stamp_us;
+  float target;
+  float control;
+  float error;
+  float integral;
+  float derivative;
+
+  float kp, ki, kd;
+};
+
+struct RPYData {
+  PIDData roll, pitch, yaw;
+};
+
+
 SBUSData sbusData;
 BNOData bnoData;
 RPYData rpyData;
@@ -38,7 +79,6 @@ void taskPID(void *pvParameters);
 void taskLOG(void *pvParameters);
 void taskServo(void *pvParameters);
 void taskLED(void *pvParameters);
-void taskUDP(void *pvParameters);
 void initDataStamp();
 void initPins();
 void printStat();
@@ -52,17 +92,6 @@ void setup() {
 
   // Dataのタイムスタンプ初期化
   initDataStamp();
-
-  // Wifi系の初期化
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(SSID, PASSWD);
-  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-      while(1) {
-          Serial.println("WiFi Failed");
-          delay(1000);
-      }
-  }
-  udp.connect(pcIP, HOST_PORT);
 
   // ミューテックス
   sbusDataMutex = xSemaphoreCreateMutex();
@@ -88,14 +117,10 @@ void setup() {
   // --- BNO055 初期化 ---
   if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000))) {
     if (!bno.begin()) {
-      while (1) {
-        Serial.println("No BNO055 detected!");
-        delay(1000);
-      };
+      Serial.println("No BNO055 detected!");
+      while (1);
     }
-    // bno.setExtCrystalUse(true); // Don't work https://forums.adafruit.com/viewtopic.php?t=180919
-    bno.setAxisRemap(Adafruit_BNO055::REMAP_CONFIG_P0);
-    bno.setAxisSign(Adafruit_BNO055::REMAP_SIGN_P1);
+    bno.setExtCrystalUse(true);
     xSemaphoreGive(i2cMutex);
   }
 
@@ -106,10 +131,9 @@ void setup() {
   xTaskCreate(taskBNO,   "BNO",   8192, NULL, 2, NULL);
   xTaskCreate(taskSBUS,  "SBUS",  8192, NULL, 1, NULL);
   xTaskCreate(taskPID,   "PID",   8192, NULL, 3, NULL);
-  xTaskCreate(taskLOG,   "LOG",   8192, NULL, 7, NULL);
+  xTaskCreate(taskLOG,   "LOG",   8192, NULL, 5, NULL);
   xTaskCreate(taskServo, "SERVO", 8192, NULL, 4, NULL);
-  xTaskCreate(taskLED,   "LED",   4096, NULL, 5, NULL);
-  xTaskCreate(taskUDP,   "UDP",   8192, NULL, 6, NULL);
+  xTaskCreate(taskLED,   "LED",   4096, NULL, 6, NULL);
 
   pinMode(LED_BUILTIN , OUTPUT);
 
@@ -181,11 +205,12 @@ void taskSBUS(void *pvParameters) {
 void taskPID(void *pvParameters) {
   const TickType_t xFrequency = pdMS_TO_TICKS(TASK_PID_UDELAY_MS);
   TickType_t xLastWakeTime = xTaskGetTickCount();   // 初期化
-  static SBUSData sbusCopy;
-  static BNOData bnoCopy;
 
   for (;;) {
     // --- 1️⃣ 最新のセンサ値をコピー ---
+    static SBUSData sbusCopy;
+    static BNOData bnoCopy;
+
     if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
       sbusCopy = sbusData;
       xSemaphoreGive(sbusDataMutex);
@@ -212,10 +237,9 @@ void taskLOG(void *pvParameters) {
 }
 
 void taskServo(void *pvParameters) {
-  static SBUSData sbusCopy;
-
   for (;;) {
     // サーボ制御コードをここに追加
+    static SBUSData sbusCopy;
 
     if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
       sbusCopy = sbusData;
@@ -227,12 +251,12 @@ void taskServo(void *pvParameters) {
       servoTHR.write(mapSbus2ServoDeg(EMERGENCY_THROTTLE_DEFAULT));
     }
     else if (flightState == STATE_MANUAL) {
-      servoAIL_L.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
-      servoAIL_R.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
-      servoELE.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]));
-      servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]));
-      servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]));
-      servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]));
+      servoAIL_L.write(mapSbus2ServoDeg(sbusCopy.ch[0]));
+      servoAIL_R.write(mapSbus2ServoDeg(sbusCopy.ch[0]));
+      servoELE.write(mapSbus2ServoDeg(sbusCopy.ch[1]));
+      servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[3]));
+      servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[2]));
+      servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[5]));
     }
 
     vTaskDelay(pdMS_TO_TICKS(TASK_SERVO_DELAY_MS));
@@ -242,56 +266,33 @@ void taskServo(void *pvParameters) {
 void taskLED(void *pvParameters) {
   for (;;) {
     if (flightState == STATE_INIT) {
-      ledControl(500, 500, 1, 0);
+      digitalWriteInv(LED_BUILTIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(500));
+      digitalWriteInv(LED_BUILTIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(500));
     }
     else if (flightState == STATE_ERROR) {
-      ledControl(100, 100, 1, 0);
+      digitalWriteInv(LED_BUILTIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(200));
     }
     else if (flightState == STATE_AUTO) {
-      ledControl(1, 0, 0, 1000);
-    }
-    else if (flightState == STATE_SEMIAUTO) {
-      ledControl(800, 100, 1, 0);
+      digitalWriteInv(LED_BUILTIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(200));
     }
     else if (flightState == STATE_MANUAL) {
-      ledControl(0, 1, 0, 1000);
+      digitalWriteInv(LED_BUILTIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(200));
     }
     else if (flightState == STATE_SBUS_LOST) {
-      ledControl(100, 100, 2, 800);
+      digitalWriteInv(LED_BUILTIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      digitalWriteInv(LED_BUILTIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      digitalWriteInv(LED_BUILTIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      digitalWriteInv(LED_BUILTIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
-  }
-}
-
-void taskUDP(void *pvParameters) {
-  static UDPSendData udpSendData;
-  static SBUSData sbusCopy;
-  static BNOData bnoCopy;
-
-  for (;;) {
-    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
-      sbusCopy = sbusData;
-      xSemaphoreGive(sbusDataMutex);
-    }
-    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(5))) {
-      bnoCopy = bnoData;
-      xSemaphoreGive(bnoDataMutex);
-    }
-
-    udpSendData.data.stamp_ms = millis();
-    for (int i = 0; i < 8; i++) {
-      udpSendData.data.sbus_data[i] = sbusCopy.ch[i];
-    }
-    udpSendData.data.sbus_connection = !sbusCopy.lostConnection;
-    udpSendData.data.roll = bnoCopy.roll;
-    udpSendData.data.pitch = bnoCopy.pitch;
-    udpSendData.data.yaw = bnoCopy.yaw;
-    udpSendData.data.ax = bnoCopy.ax;
-    udpSendData.data.ay = bnoCopy.ay;
-    udpSendData.data.az = bnoCopy.az;
-
-    udp.write(udpSendData.bytes, sizeof(udpSendData.data));
-
-    vTaskDelay(pdMS_TO_TICKS(TASK_UDP_DELAY_MS));
   }
 }
 
