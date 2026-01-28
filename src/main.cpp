@@ -47,6 +47,9 @@ void printBNOData();
 void printRPYData();//TODO
 void printSimple();//TODO
 
+// --- グローバル変数 ---
+static bool wifi_connected = false;
+
 void setup() {
   Serial.begin(115200);
 
@@ -57,12 +60,14 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, PASSWD);
   if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-      while(1) {
-          Serial.println("WiFi Failed");
-          delay(1000);
-      }
+    wifi_connected = false;
+  } else {
+    wifi_connected = true;
   }
-  udp.connect(pcIP, HOST_PORT);
+
+  if (wifi_connected) {
+    udp.connect(pcIP, HOST_PORT);
+  }
 
   // ミューテックス
   sbusDataMutex = xSemaphoreCreateMutex();
@@ -289,7 +294,10 @@ void taskUDP(void *pvParameters) {
     udpSendData.data.ay = bnoCopy.ay;
     udpSendData.data.az = bnoCopy.az;
 
-    udp.write(udpSendData.bytes, sizeof(udpSendData.data));
+    if (wifi_connected) {
+      udp.write(udpSendData.bytes, sizeof(udpSendData.data));
+    }
+
 
     vTaskDelay(pdMS_TO_TICKS(TASK_UDP_DELAY_MS));
   }
