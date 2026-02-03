@@ -8,7 +8,6 @@
 #include "SBUSReceiver.h"
 #include "Util.h"
 #include "passwd.h"
-#include "PID.h"
 
 // --- 外部クラス関連 ---
 Adafruit_BNO055 bno = Adafruit_BNO055(BNO055_SENSOR_ID, BNO055_I2C_ADDRESS);
@@ -21,8 +20,6 @@ IPAddress localIP(LOCAL_IP);
 IPAddress subnet(SUBNET_MASK);
 IPAddress gatewayIP(GATEWAY_IP);
 IPAddress dnsIP(DNS_IP);
-PID pidRoll(DEFAULT_ROLL_KP, DEFAULT_ROLL_KI, DEFAULT_ROLL_KD);
-PID pidPitch(DEFAULT_PITCH_KP, DEFAULT_PITCH_KI, DEFAULT_PITCH_KD);
 
 // --- 内部状態 ---
 FlightState flightState_ = STATE_INIT;
@@ -31,11 +28,13 @@ FlightState flightState_ = STATE_INIT;
 SBUSData sbusData;
 BNOData bnoData;
 RPYData rpyData;
+ServoData servoData;
 
 // --- Mutex ---
 SemaphoreHandle_t sbusDataMutex;
 SemaphoreHandle_t bnoDataMutex;
 SemaphoreHandle_t rpyDataMutex;
+SemaphoreHandle_t servoDataMutex;
 SemaphoreHandle_t i2cMutex;
 SemaphoreHandle_t serialMutex;
 
@@ -49,6 +48,7 @@ void taskLED(void *pvParameters);
 void taskUDP(void *pvParameters);
 void taskFSM(void *pvParameters);
 void initDataStamp();
+void initRPYData();
 void initPins();
 void printStat();
 void printSBUSData();
@@ -64,11 +64,19 @@ static bool on_stream_ = true;
 void setup() {
   Serial.begin(115200);
 
-  pidRoll.setIntegralLimits(DEFAULT_ROLL_INTEGRAL_MIN, DEFAULT_ROLL_INTEGRAL_MAX);
-  pidPitch.setIntegralLimits(DEFAULT_PITCH_INTEGRAL_MIN, DEFAULT_PITCH_INTEGRAL_MAX);
-
   // Dataのタイムスタンプ初期化
   initDataStamp();
+
+  rpyData.roll.kp = DEFAULT_ROLL_KP;
+  rpyData.roll.ki = DEFAULT_ROLL_KI;
+  rpyData.roll.kd = DEFAULT_ROLL_KD;
+  rpyData.roll.integral_min = DEFAULT_ROLL_INTEGRAL_MIN;
+  rpyData.roll.integral_max = DEFAULT_ROLL_INTEGRAL_MAX;
+  rpyData.pitch.kp = DEFAULT_PITCH_KP;
+  rpyData.pitch.ki = DEFAULT_PITCH_KI;
+  rpyData.pitch.kd = DEFAULT_PITCH_KD;
+  rpyData.pitch.integral_min = DEFAULT_PITCH_INTEGRAL_MIN;
+  rpyData.pitch.integral_max = DEFAULT_PITCH_INTEGRAL_MAX;
 
   // Wifi系の初期化
   WiFi.config(localIP, gatewayIP, subnet, dnsIP);
@@ -88,6 +96,7 @@ void setup() {
   rpyDataMutex = xSemaphoreCreateMutex();
   i2cMutex = xSemaphoreCreateMutex();
   serialMutex = xSemaphoreCreateMutex();
+  servoDataMutex = xSemaphoreCreateMutex();
 
   // --- Servo 初期化 ---
   servoAIL_L.setPeriodHertz(50); // 50Hz
@@ -112,8 +121,8 @@ void setup() {
       };
     }
     // bno.setExtCrystalUse(true); // Don't work https://forums.adafruit.com/viewtopic.php?t=180919
-    bno.setAxisRemap(Adafruit_BNO055::REMAP_CONFIG_P0);
-    bno.setAxisSign(Adafruit_BNO055::REMAP_SIGN_P1);
+    // bno.setAxisRemap(Adafruit_BNO055::REMAP_CONFIG_P0); //読み取りが不安定になる
+    // bno.setAxisSign(Adafruit_BNO055::REMAP_SIGN_P1);
     xSemaphoreGive(i2cMutex);
   }
 
@@ -121,14 +130,14 @@ void setup() {
   sbus.begin();
 
   // --- タスク生成 --- // 数字が大きいほど優先度高い
-  xTaskCreate(taskBNO,   "BNO",   4096, NULL, 5, NULL);
-  xTaskCreate(taskSBUS,  "SBUS",  8192, NULL, 7, NULL);
+  xTaskCreate(taskBNO,   "BNO",   6144, NULL, 5, NULL);
+  xTaskCreate(taskSBUS,  "SBUS",  6144, NULL, 7, NULL);
   xTaskCreate(taskPID,   "PID",   2048, NULL, 4, NULL);
   // xTaskCreate(taskLOG,   "LOG",   4096, NULL, 1, NULL);
   xTaskCreate(taskServo, "SERVO", 6144, NULL, 8, NULL);
-  xTaskCreate(taskLED,   "LED",   2048, NULL, 3, NULL);
+  xTaskCreate(taskLED,   "LED",   1024, NULL, 3, NULL);
   xTaskCreate(taskUDP,   "UDP",   6144, NULL, 2, NULL);
-  xTaskCreate(taskFSM,   "FSM",   2048, NULL, 6, NULL);
+  xTaskCreate(taskFSM,   "FSM",   1024, NULL, 6, NULL);
   pinMode(LED_BUILTIN , OUTPUT);
 
   flightState_ = STATE_MANUAL;
@@ -145,12 +154,15 @@ void recUDPDataCB(AsyncUDPPacket packet) {
 
     on_stream_ = udpReceiveData.data.enable_stream != 0;
     // PIDパラメータ更新
-    pidRoll.setKp(udpReceiveData.data.roll_kp);
-    pidRoll.setKi(udpReceiveData.data.roll_ki);
-    pidRoll.setKd(udpReceiveData.data.roll_kd);
-    pidPitch.setKp(udpReceiveData.data.pitch_kp);
-    pidPitch.setKi(udpReceiveData.data.pitch_ki);
-    pidPitch.setKd(udpReceiveData.data.pitch_kd);
+    if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(10))) {
+      rpyData.roll.kp = udpReceiveData.data.roll_kp;
+      rpyData.roll.ki = udpReceiveData.data.roll_ki;
+      rpyData.roll.kd = udpReceiveData.data.roll_kd;
+      rpyData.pitch.kp = udpReceiveData.data.pitch_kp;
+      rpyData.pitch.ki = udpReceiveData.data.pitch_ki;
+      rpyData.pitch.kd = udpReceiveData.data.pitch_kd;
+      xSemaphoreGive(rpyDataMutex);
+    }
   }
 
   digitalWriteInv(LED_BUILTIN, HIGH);
@@ -174,8 +186,8 @@ void taskBNO(void *pvParameters) {
       bnoData.last_stamp_us = bnoData.stamp_us;
       bnoData.stamp_us = micros();
       bnoData.yaw = pideg2pideg(orientationData.orientation.x);
-      bnoData.pitch = orientationData.orientation.y;
-      bnoData.roll = orientationData.orientation.z;
+      bnoData.pitch = -orientationData.orientation.z;
+      bnoData.roll = -orientationData.orientation.y;
       bnoData.rx = angVelocityData.gyro.x;
       bnoData.ry = angVelocityData.gyro.y;
       bnoData.rz = angVelocityData.gyro.z;
@@ -217,45 +229,58 @@ void taskPID(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();   // 初期化
   static SBUSData sbusCopy;
   static BNOData bnoCopy;
+  static RPYData rpyCopy;
 
   for (;;) {
     // --- 1️⃣ 最新のセンサ値をコピー ---
-    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
+    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(2))) {
       sbusCopy = sbusData;
       xSemaphoreGive(sbusDataMutex);
     }
-    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(5))) {
+    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(2))) {
       bnoCopy = bnoData;
       xSemaphoreGive(bnoDataMutex);
     }
+    if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(2))) {
+      // ターゲット値計算
+      rpyCopy = rpyData;
+      xSemaphoreGive(rpyDataMutex);
+    }
 
     // --- 2️⃣ PID演算 ---
-    float dt_roll = (rpyData.roll.stamp_us - rpyData.roll.last_stamp_us) / 1000000.0f;
-    float dt_pitch = (rpyData.pitch.stamp_us - rpyData.pitch.last_stamp_us) / 1000000.0f;
-    float target_roll = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]);
-    float target_pitch = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]);
-    float control_roll = pidRoll.calculate(target_roll, bnoCopy.roll, dt_roll);
-    float control_pitch = pidPitch.calculate(target_pitch, bnoCopy.pitch, dt_pitch);
+    float dt_roll = (rpyCopy.roll.stamp_us - rpyCopy.roll.last_stamp_us) / 1000000.0f;
+    float dt_pitch = (rpyCopy.pitch.stamp_us - rpyCopy.pitch.last_stamp_us) / 1000000.0f;
+    float error_roll = bnoCopy.roll - (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]) - 90.0);
+    error_roll = -error_roll; // 逆転
+    float error_pitch = bnoCopy.pitch - (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]) - 90.0);
+    float integral_roll = rpyCopy.roll.integral + error_roll * dt_roll;
+    integral_roll = constrain(integral_roll, rpyCopy.roll.integral_min, rpyCopy.roll.integral_max);
+    float integral_pitch = rpyCopy.pitch.integral + error_pitch * dt_pitch;
+    integral_pitch = constrain(integral_pitch, rpyCopy.pitch.integral_min, rpyCopy.pitch.integral_max);
+    float derivative_roll = (error_roll - rpyCopy.roll.error) / dt_roll;
+    float derivative_pitch = (error_pitch - rpyCopy.pitch.error) / dt_pitch;
+    float control_roll = rpyCopy.roll.kp*error_roll + rpyCopy.roll.ki*integral_roll + rpyCopy.roll.kd*derivative_roll;
+    float control_pitch = rpyCopy.pitch.kp*error_pitch + rpyCopy.pitch.ki*integral_pitch + rpyCopy.pitch.kd*derivative_pitch;
+
     // --- 3️⃣ 結果を共有構造体に保存 ---
     if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(5))) {
       // Roll
       rpyData.roll.last_stamp_us = rpyData.roll.stamp_us;
       rpyData.roll.stamp_us = micros();
-      rpyData.roll.target = target_roll;
+      // rpyData.roll.target = target_roll;
       rpyData.roll.control = control_roll;
-      rpyData.roll.error = target_roll - bnoCopy.roll;
-      rpyData.roll.integral = pidRoll.getKi() == 0.0f ? 0.0f : pidRoll.calculate(target_roll, bnoCopy.roll, dt_roll) / pidRoll.getKi();
-      rpyData.roll.derivative = pidRoll.getKd() == 0.0f ? 0.0f : (rpyData.roll.error - rpyData.roll.error) / dt_roll;
+      rpyData.roll.error = error_roll;
+      rpyData.roll.integral = integral_roll;
+      rpyData.roll.derivative = derivative_roll;
 
       // Pitch
       rpyData.pitch.last_stamp_us = rpyData.pitch.stamp_us;
       rpyData.pitch.stamp_us = micros();
-      rpyData.pitch.target = target_pitch;
+      // rpyData.pitch.target = target_pitch;
       rpyData.pitch.control = control_pitch;
-      rpyData.pitch.error = target_pitch - bnoCopy.pitch;
-      rpyData.pitch.integral = pidPitch.getKi() == 0.0f ? 0.0f : pidPitch.calculate(target_pitch, bnoCopy.pitch, dt_pitch) / pidPitch.getKi();
-      rpyData.pitch.derivative = pidPitch.getKd() == 0.0f ? 0.0f : (rpyData.pitch.error - rpyData.pitch.error) / dt_pitch;
-
+      rpyData.pitch.error = error_pitch;
+      rpyData.pitch.integral = integral_pitch;
+      rpyData.pitch.derivative = derivative_pitch;
       xSemaphoreGive(rpyDataMutex);
     }
 
@@ -277,24 +302,27 @@ void taskServo(void *pvParameters) {
   static SBUSData sbusCopy;
 
   for (;;) {
-    // サーボ制御コードをここに追加
-
     if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
       sbusCopy = sbusData;
       xSemaphoreGive(sbusDataMutex);
     }
 
+    int16_t servo_data_ail = mapSbus2ServoDeg(SBUS_NUTRAL);
+    int16_t servo_data_ele = mapSbus2ServoDeg(SBUS_NUTRAL);
+    int16_t servo_data_rud = mapSbus2ServoDeg(SBUS_NUTRAL);
+    int16_t servo_data_thr = mapSbus2ServoDeg(EMERGENCY_THROTTLE_DEFAULT);
+    int16_t servo_data_ger = mapSbus2ServoDeg(SBUS_NUTRAL);
+
     if (flightState_ == STATE_SBUS_LOST || flightState_ == STATE_INIT) {
       // SBUS信号が失われた場合、スロットルを最低に設定
-      servoTHR.write(mapSbus2ServoDeg(EMERGENCY_THROTTLE_DEFAULT));
+      servo_data_thr = mapSbus2ServoDeg(EMERGENCY_THROTTLE_DEFAULT);
     }
     else if (flightState_ == STATE_MANUAL) {
-      servoAIL_L.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
-      servoAIL_R.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
-      servoELE.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]));
-      servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]));
-      servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]));
-      servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]));
+      servo_data_ail = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]);
+      servo_data_ele = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]);
+      servo_data_rud = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]);
+      servo_data_thr = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]);
+      servo_data_ger = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]);
     }
     else if (flightState_ == STATE_SEMIAUTO) {
       // PID制御を適用
@@ -303,17 +331,28 @@ void taskServo(void *pvParameters) {
         float pitch_control = rpyData.pitch.control;
         xSemaphoreGive(rpyDataMutex);
 
-        // サーボ信号の計算（例）
-        int16_t ailon_signal = constrain(roll_control + 180, 0, 360);
-        int16_t elevator_signal = constrain(pitch_control + 180, 0, 360);
-
-        servoAIL_L.write(ailon_signal);
-        servoAIL_R.write(ailon_signal);
-        servoELE.write(elevator_signal);
-        servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]));
-        servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]));
-        servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]));
+        servo_data_ail = constrain(roll_control + 90, 0, 360);
+        servo_data_ele = constrain(pitch_control + 90, 0, 360);
+        servo_data_rud = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]);
+        servo_data_thr = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]);
+        servo_data_ger = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]);
       }
+    }
+
+    servoAIL_L.write(servo_data_ail);
+    servoAIL_R.write(servo_data_ail);
+    servoELE.write(servo_data_ele);
+    servoRUD.write(servo_data_rud);
+    servoTHR.write(servo_data_thr);
+    servoGER.write(servo_data_ger);
+
+    if (xSemaphoreTake(servoDataMutex, pdMS_TO_TICKS(5))) {
+      servoData.aileron = servo_data_ail;
+      servoData.elevator = servo_data_ele;
+      servoData.rudder = servo_data_rud;
+      servoData.throttle = servo_data_thr;
+      servoData.gear = servo_data_ger;
+      xSemaphoreGive(servoDataMutex);
     }
 
     vTaskDelay(pdMS_TO_TICKS(TASK_SERVO_DELAY_MS));
@@ -347,6 +386,7 @@ void taskUDP(void *pvParameters) {
   static UDPSendData udpSendData;
   static SBUSData sbusCopy;
   static BNOData bnoCopy;
+  static ServoData servoCopy;
 
   for (;;) {
     if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
@@ -356,6 +396,10 @@ void taskUDP(void *pvParameters) {
     if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(5))) {
       bnoCopy = bnoData;
       xSemaphoreGive(bnoDataMutex);
+    }
+    if (xSemaphoreTake(servoDataMutex, pdMS_TO_TICKS(5))) {
+      servoCopy = servoData;
+      xSemaphoreGive(servoDataMutex);
     }
 
     udpSendData.data.stamp_ms = millis();
@@ -369,6 +413,11 @@ void taskUDP(void *pvParameters) {
     udpSendData.data.ay = bnoCopy.ay;
     udpSendData.data.az = bnoCopy.az;
     udpSendData.data.flight_state = static_cast<uint8_t>(flightState_);
+    udpSendData.data.servo_aileron = servoCopy.aileron;
+    udpSendData.data.servo_elevator = servoCopy.elevator;
+    udpSendData.data.servo_rudder = servoCopy.rudder;
+    udpSendData.data.servo_throttle = servoCopy.throttle;
+    udpSendData.data.servo_gear = servoCopy.gear;
 
     if (wifi_connected_ && on_stream_) {
       udp_client.write(udpSendData.bytes, sizeof(udpSendData.data));

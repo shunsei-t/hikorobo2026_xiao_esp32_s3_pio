@@ -27,8 +27,7 @@
 #define SBUS_CH_ELE (1)
 #define SBUS_CH_THR (2)
 #define SBUS_CH_RUD (3)
-#define SBUS_CH_GEA (5)
-#define SBUS_CH_SG (4)
+#define SBUS_CH_GEA (4)
 #define SBUS_CH_SE (7)
 
 #define EMERGENCY_THROTTLE_DEFAULT (352) // プロポでsbusのスロットル最小値を変更した場合、ここも合わせて変更すること
@@ -36,16 +35,18 @@
 #define PROPO_SW_MID (1024)
 #define PROPO_SW_DOWN (352)
 
-#define DEFAULT_ROLL_KP (5.0f)
+#define DEFAULT_ROLL_KP (1.0f)
 #define DEFAULT_ROLL_KI (0.0f)
 #define DEFAULT_ROLL_KD (0.0f)
-#define DEFAULT_ROLL_INTEGRAL_MIN (-100.0f)
-#define DEFAULT_ROLL_INTEGRAL_MAX (100.0f)
-#define DEFAULT_PITCH_KP (5.0f)
+#define DEFAULT_ROLL_INTEGRAL_MIN (-10.0f)
+#define DEFAULT_ROLL_INTEGRAL_MAX (10.0f)
+#define DEFAULT_PITCH_KP (1.0f)
 #define DEFAULT_PITCH_KI (0.0f)
 #define DEFAULT_PITCH_KD (0.0f)
-#define DEFAULT_PITCH_INTEGRAL_MIN (-100.0f)
-#define DEFAULT_PITCH_INTEGRAL_MAX (100.0f)
+#define DEFAULT_PITCH_INTEGRAL_MIN (-10.0f)
+#define DEFAULT_PITCH_INTEGRAL_MAX (10.0f)
+
+#define SBUS_NUTRAL (1024)
 
 void digitalWriteInv(uint8_t pin, uint8_t val) {
   digitalWrite(pin, val == HIGH ? LOW : HIGH);
@@ -78,6 +79,14 @@ struct SBUSData {
   bool lostConnection;
 };
 
+struct ServoData {
+  int16_t aileron;
+  int16_t elevator;
+  int16_t rudder;
+  int16_t throttle;
+  int16_t gear;
+};
+
 struct BNOData {
   uint32_t stamp_us;
   uint32_t last_stamp_us;
@@ -93,6 +102,8 @@ struct PIDData {
   float control;
   float error;
   float integral;
+  float integral_min;
+  float integral_max;
   float derivative;
 
   float kp, ki, kd;
@@ -108,6 +119,7 @@ struct UDPSendDataStruct {
   uint8_t flight_state;
   float roll, pitch, yaw;
   float ax, ay, az;
+  int16_t servo_aileron, servo_elevator, servo_rudder, servo_throttle, servo_gear;
 } __attribute__((packed));
 
 // --- UDP用構造 ---
@@ -118,12 +130,12 @@ union UDPSendData {
 
 struct UDPReceiveDataStruct {
   uint16_t enable_stream;
-  uint16_t roll_kp;
-  uint16_t roll_ki;
-  uint16_t roll_kd;
-  uint16_t pitch_kp;
-  uint16_t pitch_ki;
-  uint16_t pitch_kd;
+  float roll_kp;
+  float roll_ki;
+  float roll_kd;
+  float pitch_kp;
+  float pitch_ki;
+  float pitch_kd;
 } __attribute__((packed));
 
 union UDPReceiveData {

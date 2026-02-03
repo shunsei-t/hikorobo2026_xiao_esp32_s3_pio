@@ -9,9 +9,13 @@ HOSTはホストPCのIPとポート
 ```passwd.h
 #define SSID "hugahuga"
 #define PASSWD "hogehogehoge"
-#define HOST_IP xxx,xxx,xxx,xxx // , 区切り
-#define HOST_PORT xxxx
-#define MY_PORT 1234
+#define HOST_IP 192,168,10,16//環境に合わせる
+#define HOST_PORT 5000
+#define LOCAL_IP 192,168,10,15
+#define LOCAL_PORT 1234
+#define SUBNET_MASK 255,255,255,0
+#define GATEWAY_IP 192,168,10,1
+#define DNS_IP 192,168,10,1
 ```
 
 # 状態遷移
@@ -35,3 +39,8 @@ CH8をSEに設定します
 // id6 D8  エルロン２
 // id7 D9  ピッチ
 // id8 D10  AUX5
+
+# 座標系
+BNOの座標変換は不安定になったので、rpyだけ変換している
+![alt text](image.png)
+https://airmanship.jp/airplane_axis.html
