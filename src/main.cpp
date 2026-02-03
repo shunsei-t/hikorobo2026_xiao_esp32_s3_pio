@@ -8,16 +8,24 @@
 #include "SBUSReceiver.h"
 #include "Util.h"
 #include "passwd.h"
+#include "PID.h"
 
 // --- 外部クラス関連 ---
 Adafruit_BNO055 bno = Adafruit_BNO055(BNO055_SENSOR_ID, BNO055_I2C_ADDRESS);
 SBUSReceiver sbus(SBUS_SERIAL, PIN_SERIAL1_RX, PIN_SERIAL1_TX);
 Servo servoTHR, servoELE, servoRUD, servoAIL_L, servoAIL_R, servoGER;
-AsyncUDP udp;
-IPAddress pcIP(HOST_IP);
+AsyncUDP udp_client;
+AsyncUDP udp_server;
+IPAddress hostIP(HOST_IP);
+IPAddress localIP(LOCAL_IP);
+IPAddress subnet(SUBNET_MASK);
+IPAddress gatewayIP(GATEWAY_IP);
+IPAddress dnsIP(DNS_IP);
+PID pidRoll(DEFAULT_ROLL_KP, DEFAULT_ROLL_KI, DEFAULT_ROLL_KD);
+PID pidPitch(DEFAULT_PITCH_KP, DEFAULT_PITCH_KI, DEFAULT_PITCH_KD);
 
 // --- 内部状態 ---
-FlightState flightState = STATE_INIT;
+FlightState flightState_ = STATE_INIT;
 
 // -- 内部データ構造体 ---
 SBUSData sbusData;
@@ -39,6 +47,7 @@ void taskLOG(void *pvParameters);
 void taskServo(void *pvParameters);
 void taskLED(void *pvParameters);
 void taskUDP(void *pvParameters);
+void taskFSM(void *pvParameters);
 void initDataStamp();
 void initPins();
 void printStat();
@@ -46,27 +55,31 @@ void printSBUSData();
 void printBNOData();
 void printRPYData();//TODO
 void printSimple();//TODO
+void recUDPDataCB(AsyncUDPPacket packet);
 
 // --- グローバル変数 ---
-static bool wifi_connected = false;
+static bool wifi_connected_ = false;
+static bool on_stream_ = true;
 
 void setup() {
   Serial.begin(115200);
+
+  pidRoll.setIntegralLimits(DEFAULT_ROLL_INTEGRAL_MIN, DEFAULT_ROLL_INTEGRAL_MAX);
+  pidPitch.setIntegralLimits(DEFAULT_PITCH_INTEGRAL_MIN, DEFAULT_PITCH_INTEGRAL_MAX);
 
   // Dataのタイムスタンプ初期化
   initDataStamp();
 
   // Wifi系の初期化
-  WiFi.mode(WIFI_STA);
+  WiFi.config(localIP, gatewayIP, subnet, dnsIP);
   WiFi.begin(SSID, PASSWD);
-  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    wifi_connected = false;
-  } else {
-    wifi_connected = true;
-  }
+  wifi_connected_ = WiFi.waitForConnectResult() == WL_CONNECTED;
 
-  if (wifi_connected) {
-    udp.connect(pcIP, HOST_PORT);
+  if (wifi_connected_) {
+    udp_client.connect(hostIP, HOST_PORT);
+    if (udp_server.listen(LOCAL_PORT)) {
+      udp_server.onPacket(recUDPDataCB);
+    }
   }
 
   // ミューテックス
@@ -107,22 +120,42 @@ void setup() {
   // --- SBUS 初期化 ---
   sbus.begin();
 
-  // --- タスク生成 ---
-  xTaskCreate(taskBNO,   "BNO",   8192, NULL, 2, NULL);
-  xTaskCreate(taskSBUS,  "SBUS",  8192, NULL, 1, NULL);
-  xTaskCreate(taskPID,   "PID",   8192, NULL, 3, NULL);
-  xTaskCreate(taskLOG,   "LOG",   8192, NULL, 7, NULL);
-  xTaskCreate(taskServo, "SERVO", 8192, NULL, 4, NULL);
-  xTaskCreate(taskLED,   "LED",   4096, NULL, 5, NULL);
-  xTaskCreate(taskUDP,   "UDP",   8192, NULL, 6, NULL);
-
+  // --- タスク生成 --- // 数字が大きいほど優先度高い
+  xTaskCreate(taskBNO,   "BNO",   4096, NULL, 5, NULL);
+  xTaskCreate(taskSBUS,  "SBUS",  8192, NULL, 7, NULL);
+  xTaskCreate(taskPID,   "PID",   2048, NULL, 4, NULL);
+  // xTaskCreate(taskLOG,   "LOG",   4096, NULL, 1, NULL);
+  xTaskCreate(taskServo, "SERVO", 6144, NULL, 8, NULL);
+  xTaskCreate(taskLED,   "LED",   2048, NULL, 3, NULL);
+  xTaskCreate(taskUDP,   "UDP",   6144, NULL, 2, NULL);
+  xTaskCreate(taskFSM,   "FSM",   2048, NULL, 6, NULL);
   pinMode(LED_BUILTIN , OUTPUT);
 
-  flightState = STATE_INIT;
+  flightState_ = STATE_MANUAL;
 }
 
 void loop() {
   vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+void recUDPDataCB(AsyncUDPPacket packet) {
+  UDPReceiveData udpReceiveData;
+  if (packet.length() == sizeof(UDPReceiveDataStruct)) {
+    memcpy(udpReceiveData.bytes, packet.data(), sizeof(UDPReceiveDataStruct));
+
+    on_stream_ = udpReceiveData.data.enable_stream != 0;
+    // PIDパラメータ更新
+    pidRoll.setKp(udpReceiveData.data.roll_kp);
+    pidRoll.setKi(udpReceiveData.data.roll_ki);
+    pidRoll.setKd(udpReceiveData.data.roll_kd);
+    pidPitch.setKp(udpReceiveData.data.pitch_kp);
+    pidPitch.setKi(udpReceiveData.data.pitch_ki);
+    pidPitch.setKd(udpReceiveData.data.pitch_kd);
+  }
+
+  digitalWriteInv(LED_BUILTIN, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(10));
+  digitalWriteInv(LED_BUILTIN, LOW);
 }
 
 // --- BNO055タスク ---
@@ -140,7 +173,7 @@ void taskBNO(void *pvParameters) {
     if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(10))) {
       bnoData.last_stamp_us = bnoData.stamp_us;
       bnoData.stamp_us = micros();
-      bnoData.yaw = orientationData.orientation.x;
+      bnoData.yaw = pideg2pideg(orientationData.orientation.x);
       bnoData.pitch = orientationData.orientation.y;
       bnoData.roll = orientationData.orientation.z;
       bnoData.rx = angVelocityData.gyro.x;
@@ -170,11 +203,7 @@ void taskSBUS(void *pvParameters) {
         sbusData.failsafe = sbus.isFailsafe();
         sbusData.frameLost = sbus.isFrameLost();
         sbusData.lostConnection = sbus.isLostConnection();
-        if (sbusData.lostConnection) {
-          flightState = STATE_SBUS_LOST;
-        } else {
-          flightState = STATE_MANUAL;
-        }
+
         xSemaphoreGive(sbusDataMutex);
       }
     }
@@ -201,6 +230,34 @@ void taskPID(void *pvParameters) {
     }
 
     // --- 2️⃣ PID演算 ---
+    float dt_roll = (rpyData.roll.stamp_us - rpyData.roll.last_stamp_us) / 1000000.0f;
+    float dt_pitch = (rpyData.pitch.stamp_us - rpyData.pitch.last_stamp_us) / 1000000.0f;
+    float target_roll = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]);
+    float target_pitch = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]);
+    float control_roll = pidRoll.calculate(target_roll, bnoCopy.roll, dt_roll);
+    float control_pitch = pidPitch.calculate(target_pitch, bnoCopy.pitch, dt_pitch);
+    // --- 3️⃣ 結果を共有構造体に保存 ---
+    if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(5))) {
+      // Roll
+      rpyData.roll.last_stamp_us = rpyData.roll.stamp_us;
+      rpyData.roll.stamp_us = micros();
+      rpyData.roll.target = target_roll;
+      rpyData.roll.control = control_roll;
+      rpyData.roll.error = target_roll - bnoCopy.roll;
+      rpyData.roll.integral = pidRoll.getKi() == 0.0f ? 0.0f : pidRoll.calculate(target_roll, bnoCopy.roll, dt_roll) / pidRoll.getKi();
+      rpyData.roll.derivative = pidRoll.getKd() == 0.0f ? 0.0f : (rpyData.roll.error - rpyData.roll.error) / dt_roll;
+
+      // Pitch
+      rpyData.pitch.last_stamp_us = rpyData.pitch.stamp_us;
+      rpyData.pitch.stamp_us = micros();
+      rpyData.pitch.target = target_pitch;
+      rpyData.pitch.control = control_pitch;
+      rpyData.pitch.error = target_pitch - bnoCopy.pitch;
+      rpyData.pitch.integral = pidPitch.getKi() == 0.0f ? 0.0f : pidPitch.calculate(target_pitch, bnoCopy.pitch, dt_pitch) / pidPitch.getKi();
+      rpyData.pitch.derivative = pidPitch.getKd() == 0.0f ? 0.0f : (rpyData.pitch.error - rpyData.pitch.error) / dt_pitch;
+
+      xSemaphoreGive(rpyDataMutex);
+    }
 
     // --- 周期を正確に保って次回まで待機 ---
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -227,17 +284,36 @@ void taskServo(void *pvParameters) {
       xSemaphoreGive(sbusDataMutex);
     }
 
-    if (flightState == STATE_SBUS_LOST) {
+    if (flightState_ == STATE_SBUS_LOST || flightState_ == STATE_INIT) {
       // SBUS信号が失われた場合、スロットルを最低に設定
       servoTHR.write(mapSbus2ServoDeg(EMERGENCY_THROTTLE_DEFAULT));
     }
-    else if (flightState == STATE_MANUAL) {
+    else if (flightState_ == STATE_MANUAL) {
       servoAIL_L.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
       servoAIL_R.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]));
       servoELE.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]));
       servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]));
       servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]));
       servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]));
+    }
+    else if (flightState_ == STATE_SEMIAUTO) {
+      // PID制御を適用
+      if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(5))) {
+        float roll_control = rpyData.roll.control;
+        float pitch_control = rpyData.pitch.control;
+        xSemaphoreGive(rpyDataMutex);
+
+        // サーボ信号の計算（例）
+        int16_t ailon_signal = constrain(roll_control + 180, 0, 360);
+        int16_t elevator_signal = constrain(pitch_control + 180, 0, 360);
+
+        servoAIL_L.write(ailon_signal);
+        servoAIL_R.write(ailon_signal);
+        servoELE.write(elevator_signal);
+        servoRUD.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]));
+        servoTHR.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]));
+        servoGER.write(mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]));
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(TASK_SERVO_DELAY_MS));
@@ -246,22 +322,22 @@ void taskServo(void *pvParameters) {
 
 void taskLED(void *pvParameters) {
   for (;;) {
-    if (flightState == STATE_INIT) {
+    if (flightState_ == STATE_INIT) {
       ledControl(500, 500, 1, 0);
     }
-    else if (flightState == STATE_ERROR) {
+    else if (flightState_ == STATE_ERROR) {
       ledControl(100, 100, 1, 0);
     }
-    else if (flightState == STATE_AUTO) {
+    else if (flightState_ == STATE_AUTO) {
       ledControl(1, 0, 0, 1000);
     }
-    else if (flightState == STATE_SEMIAUTO) {
+    else if (flightState_ == STATE_SEMIAUTO) {
       ledControl(800, 100, 1, 0);
     }
-    else if (flightState == STATE_MANUAL) {
+    else if (flightState_ == STATE_MANUAL) {
       ledControl(0, 1, 0, 1000);
     }
-    else if (flightState == STATE_SBUS_LOST) {
+    else if (flightState_ == STATE_SBUS_LOST) {
       ledControl(100, 100, 2, 800);
     }
   }
@@ -286,20 +362,51 @@ void taskUDP(void *pvParameters) {
     for (int i = 0; i < 8; i++) {
       udpSendData.data.sbus_data[i] = sbusCopy.ch[i];
     }
-    udpSendData.data.sbus_connection = !sbusCopy.lostConnection;
     udpSendData.data.roll = bnoCopy.roll;
     udpSendData.data.pitch = bnoCopy.pitch;
     udpSendData.data.yaw = bnoCopy.yaw;
     udpSendData.data.ax = bnoCopy.ax;
     udpSendData.data.ay = bnoCopy.ay;
     udpSendData.data.az = bnoCopy.az;
+    udpSendData.data.flight_state = static_cast<uint8_t>(flightState_);
 
-    if (wifi_connected) {
-      udp.write(udpSendData.bytes, sizeof(udpSendData.data));
+    if (wifi_connected_ && on_stream_) {
+      udp_client.write(udpSendData.bytes, sizeof(udpSendData.data));
     }
 
-
     vTaskDelay(pdMS_TO_TICKS(TASK_UDP_DELAY_MS));
+  }
+}
+
+void taskFSM(void *pvParameters) {
+  static SBUSData sbusCopy;
+  static BNOData bnoCopy;
+
+  for (;;) {
+    if (xSemaphoreTake(sbusDataMutex, pdMS_TO_TICKS(5))) {
+      sbusCopy = sbusData;
+      xSemaphoreGive(sbusDataMutex);
+    }
+    if (xSemaphoreTake(bnoDataMutex, pdMS_TO_TICKS(5))) {
+      bnoCopy = bnoData;
+      xSemaphoreGive(bnoDataMutex);
+    }
+
+    if (micros() - sbusCopy.stamp_us > SBUS_TIMEOUT_MS * 1000 || sbusCopy.lostConnection) {
+      flightState_ = STATE_SBUS_LOST;
+      vTaskDelay(pdMS_TO_TICKS(TASK_FSM_DELAY_MS));
+      continue;
+    }
+
+    if (sbusCopy.ch[SBUS_CH_SE] == PROPO_SW_UP) {
+      flightState_ = STATE_AUTO;
+    } else if (sbusCopy.ch[SBUS_CH_SE] == PROPO_SW_MID) {
+      flightState_ = STATE_SEMIAUTO;
+    } else {
+      flightState_ = STATE_MANUAL;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(TASK_FSM_DELAY_MS));
   }
 }
 

@@ -3,24 +3,17 @@
 #define TASK_PID_UDELAY_MS (50) //時間厳格な実装
 #define TASK_LOG_DELAY_MS (200)
 #define TASK_SERVO_DELAY_MS (10)
-#define TASK_UDP_DELAY_MS (20)
+#define TASK_UDP_DELAY_MS (50)
+#define TASK_FSM_DELAY_MS (30)
 
 #define BNO055_I2C_ADDRESS (0x28)
 #define BNO055_SENSOR_ID (55)
 
 #define SBUS_SERIAL Serial1
+#define SBUS_TIMEOUT_MS 50
 
 #define PIN_SERIAL1_RX (44)
 #define PIN_SERIAL1_TX (-1)
-
-// id1 D0  エルロン
-// id2 D1  エレベーター
-// id3 D2  スロットル
-// id4 D3  ラダー
-// id5 D6  ギヤ
-// id6 D8  エルロン２
-// id7 D9  ピッチ
-// id8 D10  AUX5
 
 #define PIN_SERVO_AIL_L (D0)
 #define PIN_SERVO_AIL_R (D8)
@@ -39,6 +32,20 @@
 #define SBUS_CH_SE (7)
 
 #define EMERGENCY_THROTTLE_DEFAULT (352) // プロポでsbusのスロットル最小値を変更した場合、ここも合わせて変更すること
+#define PROPO_SW_UP (1696)
+#define PROPO_SW_MID (1024)
+#define PROPO_SW_DOWN (352)
+
+#define DEFAULT_ROLL_KP (5.0f)
+#define DEFAULT_ROLL_KI (0.0f)
+#define DEFAULT_ROLL_KD (0.0f)
+#define DEFAULT_ROLL_INTEGRAL_MIN (-100.0f)
+#define DEFAULT_ROLL_INTEGRAL_MAX (100.0f)
+#define DEFAULT_PITCH_KP (5.0f)
+#define DEFAULT_PITCH_KI (0.0f)
+#define DEFAULT_PITCH_KD (0.0f)
+#define DEFAULT_PITCH_INTEGRAL_MIN (-100.0f)
+#define DEFAULT_PITCH_INTEGRAL_MAX (100.0f)
 
 void digitalWriteInv(uint8_t pin, uint8_t val) {
   digitalWrite(pin, val == HIGH ? LOW : HIGH);
@@ -98,7 +105,7 @@ struct RPYData {
 struct UDPSendDataStruct {
   uint16_t stamp_ms;
   uint16_t sbus_data[8];
-  uint8_t  sbus_connection;
+  uint8_t flight_state;
   float roll, pitch, yaw;
   float ax, ay, az;
 } __attribute__((packed));
@@ -107,6 +114,21 @@ struct UDPSendDataStruct {
 union UDPSendData {
   UDPSendDataStruct data;
   uint8_t bytes[sizeof(UDPSendDataStruct)];
+};
+
+struct UDPReceiveDataStruct {
+  uint16_t enable_stream;
+  uint16_t roll_kp;
+  uint16_t roll_ki;
+  uint16_t roll_kd;
+  uint16_t pitch_kp;
+  uint16_t pitch_ki;
+  uint16_t pitch_kd;
+} __attribute__((packed));
+
+union UDPReceiveData {
+  UDPReceiveDataStruct data;
+  uint8_t bytes[sizeof(UDPReceiveDataStruct)];
 };
 
 void ledControl(int on_time_ms, int off_time_ms, int repeat, int interval_ms) {
@@ -129,4 +151,16 @@ void ledControl(int on_time_ms, int off_time_ms, int repeat, int interval_ms) {
     }
     vTaskDelay(pdMS_TO_TICKS(interval_ms));
   }
+}
+
+float pi2pi(float angle) {
+  while (angle > 180.0f) angle -= 360.0f;
+  while (angle < -180.0f) angle += 360.0f;
+  return angle;
+}
+
+int pideg2pideg(int deg) {
+  while (deg > 180) deg -= 360;
+  while (deg < -180) deg += 360;
+  return deg;
 }
