@@ -161,6 +161,8 @@ void recUDPDataCB(AsyncUDPPacket packet) {
       rpyData.pitch.kp = udpReceiveData.data.pitch_kp;
       rpyData.pitch.ki = udpReceiveData.data.pitch_ki;
       rpyData.pitch.kd = udpReceiveData.data.pitch_kd;
+      rpyData.roll.target = udpReceiveData.data.target_roll;
+      rpyData.pitch.target = udpReceiveData.data.target_pitch;
       xSemaphoreGive(rpyDataMutex);
     }
   }
@@ -250,9 +252,24 @@ void taskPID(void *pvParameters) {
     // --- 2️⃣ PID演算 ---
     float dt_roll = (rpyCopy.roll.stamp_us - rpyCopy.roll.last_stamp_us) / 1000000.0f;
     float dt_pitch = (rpyCopy.pitch.stamp_us - rpyCopy.pitch.last_stamp_us) / 1000000.0f;
-    float error_roll = bnoCopy.roll - (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]) - 90.0);
-    error_roll = -error_roll; // 逆転
-    float error_pitch = bnoCopy.pitch - (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]) - 90.0);
+
+    float error_roll = bnoCopy.roll - rpyCopy.roll.target;
+    float error_pitch = bnoCopy.pitch - rpyCopy.pitch.target;
+
+    if (flightState_ == STATE_SEMIAUTO) {
+      error_roll += (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_AIL]) - 90.0);
+      error_pitch -= (mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_ELE]) - 90.0);
+    }
+    else if (flightState_ == STATE_AUTO) {
+      // Nothing to do
+    }
+    else {
+      error_roll = 0;
+      error_pitch = 0;
+    }
+
+    error_pitch = -error_pitch; // 逆転
+
     float integral_roll = rpyCopy.roll.integral + error_roll * dt_roll;
     integral_roll = constrain(integral_roll, rpyCopy.roll.integral_min, rpyCopy.roll.integral_max);
     float integral_pitch = rpyCopy.pitch.integral + error_pitch * dt_pitch;
@@ -326,6 +343,20 @@ void taskServo(void *pvParameters) {
     }
     else if (flightState_ == STATE_SEMIAUTO) {
       // PID制御を適用
+      if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(5))) {
+        float roll_control = rpyData.roll.control;
+        float pitch_control = rpyData.pitch.control;
+        xSemaphoreGive(rpyDataMutex);
+
+        servo_data_ail = constrain(roll_control + 90, 0, 360);
+        servo_data_ele = constrain(pitch_control + 90, 0, 360);
+        servo_data_rud = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_RUD]);
+        servo_data_thr = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_THR]);
+        servo_data_ger = mapSbus2ServoDeg(sbusCopy.ch[SBUS_CH_GEA]);
+      }
+    }
+    else if (flightState_ == STATE_AUTO) {
+      // PID制御を適用（将来的に自律制御に拡張予定）
       if (xSemaphoreTake(rpyDataMutex, pdMS_TO_TICKS(5))) {
         float roll_control = rpyData.roll.control;
         float pitch_control = rpyData.pitch.control;

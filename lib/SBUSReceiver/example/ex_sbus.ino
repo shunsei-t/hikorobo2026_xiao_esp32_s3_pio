@@ -17,14 +17,13 @@ void loop() {
     unsigned long now = micros();
     Serial.print("DT:");
     Serial.print(now - lastTime);
-    Serial.print("  CH1:");
-    Serial.print(sbus.getChannel(0));
-    Serial.print("  CH2:");
-    Serial.print(sbus.getChannel(1));
-    Serial.print("  CH3:");
-    Serial.print(sbus.getChannel(2));
-    Serial.print("  CH4:");
-    Serial.print(sbus.getChannel(3));
+    for (int i=0; i < 16; i++) {
+      Serial.print("CH");
+      Serial.print(i+1);
+      Serial.print(":");
+      Serial.print(sbus.getChannel(i));
+      Serial.print(" ");
+    }
     Serial.print("  CH17:");
     Serial.print(sbus.getCh17());
     Serial.print("  CH18:");

@@ -38,13 +38,13 @@
 #define DEFAULT_ROLL_KP (1.0f)
 #define DEFAULT_ROLL_KI (0.0f)
 #define DEFAULT_ROLL_KD (0.0f)
-#define DEFAULT_ROLL_INTEGRAL_MIN (-10.0f)
-#define DEFAULT_ROLL_INTEGRAL_MAX (10.0f)
+#define DEFAULT_ROLL_INTEGRAL_MIN (-30.0f)
+#define DEFAULT_ROLL_INTEGRAL_MAX (30.0f)
 #define DEFAULT_PITCH_KP (1.0f)
 #define DEFAULT_PITCH_KI (0.0f)
 #define DEFAULT_PITCH_KD (0.0f)
-#define DEFAULT_PITCH_INTEGRAL_MIN (-10.0f)
-#define DEFAULT_PITCH_INTEGRAL_MAX (10.0f)
+#define DEFAULT_PITCH_INTEGRAL_MIN (-30.0f)
+#define DEFAULT_PITCH_INTEGRAL_MAX (30.0f)
 
 #define SBUS_NUTRAL (1024)
 
@@ -96,8 +96,9 @@ struct BNOData {
 };
 
 struct PIDData {
-  uint16_t stamp_us;
-  uint16_t last_stamp_us;
+  // Keep timestamps 32bit to avoid microsecond wrap every ~65 ms (uint16_t was truncating micros()).
+  uint32_t stamp_us;
+  uint32_t last_stamp_us;
   float target;
   float control;
   float error;
@@ -136,6 +137,7 @@ struct UDPReceiveDataStruct {
   float pitch_kp;
   float pitch_ki;
   float pitch_kd;
+  float target_roll, target_pitch;
 } __attribute__((packed));
 
 union UDPReceiveData {
