@@ -5,6 +5,7 @@
 #define TASK_SERVO_DELAY_MS (10)
 #define TASK_UDP_DELAY_MS (50)
 #define TASK_FSM_DELAY_MS (30)
+#define TASK_EXT_LIGHT_DELAY_MS (100)
 
 #define BNO055_I2C_ADDRESS (0x28)
 #define BNO055_SENSOR_ID (55)
@@ -21,6 +22,7 @@
 #define PIN_SERVO_RUD (D3)
 #define PIN_SERVO_THR (D2)
 #define PIN_SERVO_GEA (D6)
+#define PIN_EXT_LIGHT (D10)
 #define PIN_LED (LED_BUILTIN)
 
 #define SBUS_CH_AIL (0)
@@ -114,6 +116,7 @@ struct RPYData {
   PIDData roll, pitch, yaw;
 };
 
+// UDP送受信用 >>>
 struct UDPSendDataStruct {
   uint16_t stamp_ms;
   uint16_t sbus_data[8];
@@ -123,7 +126,6 @@ struct UDPSendDataStruct {
   int16_t servo_aileron, servo_elevator, servo_rudder, servo_throttle, servo_gear;
 } __attribute__((packed));
 
-// --- UDP用構造 ---
 union UDPSendData {
   UDPSendDataStruct data;
   uint8_t bytes[sizeof(UDPSendDataStruct)];
@@ -144,6 +146,8 @@ union UDPReceiveData {
   UDPReceiveDataStruct data;
   uint8_t bytes[sizeof(UDPReceiveDataStruct)];
 };
+
+// UDP送受信用 <<<
 
 void ledControl(int on_time_ms, int off_time_ms, int repeat, int interval_ms) {
   if (off_time_ms == 0) {

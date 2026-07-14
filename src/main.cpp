@@ -45,6 +45,7 @@ void taskPID(void *pvParameters);
 void taskLOG(void *pvParameters);
 void taskServo(void *pvParameters);
 void taskLED(void *pvParameters);
+void taskExtLight(void *pvParameters);
 void taskUDP(void *pvParameters);
 void taskFSM(void *pvParameters);
 void initDataStamp();
@@ -136,9 +137,13 @@ void setup() {
   // xTaskCreate(taskLOG,   "LOG",   4096, NULL, 1, NULL);
   xTaskCreate(taskServo, "SERVO", 6144, NULL, 8, NULL);
   xTaskCreate(taskLED,   "LED",   1024, NULL, 3, NULL);
+  xTaskCreate(taskExtLight, "EXT_LIGHT", 1024, NULL, 9, NULL);
   xTaskCreate(taskUDP,   "UDP",   6144, NULL, 2, NULL);
   xTaskCreate(taskFSM,   "FSM",   1024, NULL, 6, NULL);
   pinMode(LED_BUILTIN , OUTPUT);
+  pinMode(PIN_EXT_LIGHT, OUTPUT);
+  pinMode(D9, OUTPUT);
+  digitalWrite(D9, HIGH);
 
   flightState_ = STATE_MANUAL;
 }
@@ -409,6 +414,20 @@ void taskLED(void *pvParameters) {
     }
     else if (flightState_ == STATE_SBUS_LOST) {
       ledControl(100, 100, 2, 800);
+    }
+  }
+}
+
+void taskExtLight(void *pvParameters) {
+  for (;;) {
+    if (flightState_ == STATE_AUTO) {
+      digitalWrite(PIN_EXT_LIGHT, LOW);
+    }
+    else {
+      analogWrite(PIN_EXT_LIGHT, 255);
+      vTaskDelay(pdMS_TO_TICKS(TASK_EXT_LIGHT_DELAY_MS));
+      analogWrite(PIN_EXT_LIGHT, 255);
+      vTaskDelay(pdMS_TO_TICKS(TASK_EXT_LIGHT_DELAY_MS));
     }
   }
 }
